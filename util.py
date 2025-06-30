@@ -75,3 +75,86 @@ def accum_grads_loop(
 
 
 
+def accum_grads_scanaccum_grads_loop(
+        batch : Batch,
+        state : TrainState,
+        key,
+        n_minbatch : int,
+        loss_fn : Callable,
+
+) -> Tuple[Pytree , Metrics]:
+    
+    bs = batch.inputs.shape[0]
+    min_batchSize = bs // n_minbatch
+    keys = jax.random.split(key , n_minbatch)
+
+    grad_fn = jax.value_and_grad(loss_fn , has_aux=True)
+
+    def _minbatch_step(
+            batch_idx : jax.Array | int
+    ) -> Tuple[Pytree , Metrics]:
+        
+        minibatch = jax.tree_util.tree_map(
+            lambda x : jax.lax.dynamic_slice_in_dim(
+                x , start_index=batch_idx * min_batchSize,
+                slice_size=min_batchSize,
+                axis=0
+            ),
+            batch,
+        )
+
+        (_ , step_metric) , step_grad = grad_fn(
+            state.params , 
+            state.apply_fn,
+            minibatch,
+            keys[batch_idx]
+        )
+
+        return step_grad , step_metric
+    
+
+    def _scan_step(
+            carry : Tuple[Pytree , Metrics],
+            batch_idx : jax.Array | int,
+
+    ) -> Tuple[Tuple[Pytree , Metrics] , None]:
+        
+        step_grads , step_metrics = _minbatch_step(batch_idx)
+        carry = jax.tree_util.tree_map(
+            jnp.add ,
+            carry,
+            (step_grads , step_metrics)
+        )
+
+        return carry , None
+    
+
+    grads_shapes , metrics_shape = jax.eval_shape(_minbatch_step , 0)
+
+    grads = jax.tree_util.tree_map(
+        lambda x : jnp.zeros(x.shape , x.dtype) ,
+        grads_shapes
+    )
+
+    metrics = jax.tree_util.tree_map(
+        lambda x : jnp.zeros(x.shape , x.dtype) ,
+        metrics_shape
+    )
+
+
+    (grads , metrics) , _ = jax.lax.scan(
+        _scan_step ,
+        init=(grads , metrics),
+        xs=jnp.arange(n_minbatch),
+        length=n_minbatch
+    )
+
+    grads = jax.tree_util.tree_map(
+        lambda g : g / n_minbatch,
+        grads
+    )
+
+    return grads , metrics
+
+
+
