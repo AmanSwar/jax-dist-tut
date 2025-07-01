@@ -3,6 +3,7 @@ import jax.numpy as jnp
 from flax.struct import dataclass
 from flax.training import train_state
 from typing import Any , Callable , Dict , Tuple
+import numpy as np
 
 import textwrap
 from termcolor import colored
@@ -205,4 +206,5 @@ def print_metrics(
         lines = [title.center(max_len, "=")] + lines
     print("\n".join(lines))
 
-
+def get_num_params(state: TrainState) -> int:
+    return sum(np.prod(x.shape) for x in jax.tree_util.tree_leaves(state.params))
