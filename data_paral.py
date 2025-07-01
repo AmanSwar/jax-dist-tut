@@ -168,6 +168,26 @@ state_dp = init_dp_fn(
 )
 
 
+def loss_fn(
+        params,
+        apply_fn,
+        batch,
+        rng
+):
+    
+    dropout_rng = fold_rng_over_axis(rng , CONFIG.data_axis_name)
+    logits = apply_fn({"params" : params} , batch.inputs , train=True , rngs={"dropout" : dropout_rng})
+
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits , batch.labels)
+
+    correct_pred = jnp.equal(jnp.argmax(logits , axis=-1) , batch.labels)
+
+    bs =batch.inputs.shape[0]
+    step_metrics = {"loss" : (loss.sum() , bs) , "accuracy" : (correct_pred.sum() , bs)}
+    loss = loss.mean()
+
+    return loss , step_metrics
+
 
 
 
