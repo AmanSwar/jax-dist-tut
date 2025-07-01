@@ -22,7 +22,7 @@ from jax.sharding import PartitionSpec as P
 from ml_collections import ConfigDict
 from absl import logging
 
-from util import Batch , TrainState , accum_grads 
+from util import Batch , TrainState , accum_grads , Pytree , Metrics
 
 
 def fold_rng_over_axis(
@@ -101,6 +101,56 @@ class Classifier(nn.Module):
 
         return x
     
+# init
+model_dp = Classifier(config=CONFIG.model)
+optimizer = optax.adamw(
+    learning_rate=CONFIG.OPTIMIZER_CONFIG.learning_rate,
+)
+
+rng =  jax.random.PRNGKey(CONFIG.seed)
+
+model_init_rng , data_inp_rng , datal_label_rng = jax.random.split(rng , 3)
+batch = Batch(
+    inputs= jax.random.normal(
+        data_inp_rng,
+        (CONFIG.DATA_CONFIG.batch_size , CONFIG.DATA_CONFIG.input_size) # type: ignore
+    ),
+    labels = jax.random.normal(
+        datal_label_rng , 
+        (CONFIG.DATA_CONFIG.batch_size,),
+        0,
+        CONFIG.DATA_CONFIG.num_classes
+    ),
+)
+
+
+
+def init_dp(
+        rng,
+        x : jax.Array,
+        model : nn.Module
+) -> TrainState:
+    """
+    function to initialize training setup
+    """
+    init_rng , rng = jax.random.split(rng)
+    var = model.init({"params" : init_rng} , x , train=False)
+    params = var.pop("params")
+
+    state = TrainState.create(
+        apply_fn=model.apply,
+        params=params,
+        tx=optimizer,
+        rng=rng,
+    )
+
+    return state
+
+
+
+
+
+
 
 
         
