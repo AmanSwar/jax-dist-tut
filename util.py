@@ -189,3 +189,20 @@ def accum_grads(
             n_minbatch=num_minibatches,
             loss_fn=loss_fn
         )
+    
+
+def print_metrics(
+        metrics:Metrics,
+        title : str,
+
+) -> None:
+    
+    metrics = jax.device_get(metrics)
+    lines = [f"{k}: {v[0] / v[1]:.6f}" for k, v in metrics.items()]
+    if title:
+        title = f" {title} "
+        max_len = max(len(title), max(map(len, lines)))
+        lines = [title.center(max_len, "=")] + lines
+    print("\n".join(lines))
+
+
