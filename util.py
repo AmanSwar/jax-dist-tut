@@ -4,7 +4,13 @@ from flax.struct import dataclass
 from flax.training import train_state
 from typing import Any , Callable , Dict , Tuple
 
-import os
+import textwrap
+from termcolor import colored
+
+def print_exception(e):
+  name = colored(f'{type(e).__name__}', 'red', force_color=True)
+  print(textwrap.fill(f'{name}: {str(e)}'))
+
 
 Pytree = Any
 Metrics = Dict[str , Tuple[jax.Array , ...]]
@@ -162,7 +168,7 @@ def accum_grads(
     num_minibatches: int,
     loss_fn: Callable,
     use_scan: bool = False,
-) -> Tuple[PyTree, Metrics]:
+) -> Tuple[Pytree, Metrics]:
     
     if use_scan:
 
