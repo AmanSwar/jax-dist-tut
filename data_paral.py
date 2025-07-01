@@ -147,6 +147,26 @@ def init_dp(
     return state
 
 
+devices = np.array(jax.devices())
+#init mesh
+mesh = Mesh(devices , (CONFIG.data_axis_name,))
+
+#initialize sharding
+init_dp_fn = jax.jit(
+    shard_map(
+        functools.partial(init_dp , model=model_dp),
+        mesh,
+        in_specs=(P() , P(CONFIG.data_axis_name)),
+        out_specs=P(),
+        check_rep=False,
+    ),
+)
+
+state_dp = init_dp_fn(
+    model_init_rng,
+    batch.inputs
+)
+
 
 
 
