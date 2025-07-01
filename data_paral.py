@@ -22,7 +22,7 @@ from jax.sharding import PartitionSpec as P
 from ml_collections import ConfigDict
 from absl import logging
 
-from util import Batch , TrainState , accum_grads , Pytree , Metrics
+from util import Batch , TrainState , accum_grads , Pytree , Metrics , print_metrics
 
 
 def fold_rng_over_axis(
@@ -238,11 +238,43 @@ def train_step_dp(
     return new_state , metrics
 
 
+train_step_dp_fn = jax.jit(
+    shard_map(
+        train_step_dp,
+        mesh,
+        in_specs=(P() , P() , P(CONFIG.data_axis_name)),
+        out_specs=(P() , P()),
+        check_rep=False,
+    ),
+
+    donate_argnames=("state" , "metrics"),
+)
 
 
-    
+
+_ , metric_shape = jax.eval_shape(
+    train_step_dp_fn,
+    state_dp,
+    None,
+    batch
+)
 
 
+metrics_dp = jax.tree_util.tree_map(
+    lambda x : jnp.zeros(
+        x.shape,
+        dtype=x.dtype
+    ),
+    metric_shape,)    
+
+#main loop 
+for _ in range(10):
+
+    state_dp , metrics_dp = train_step_dp_fn(state_dp , metrics_dp , batch)
+
+final_metrics_dp = jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shape)
+state_dp, final_metrics_dp = train_step_dp_fn(state_dp, final_metrics_dp, batch)
+print_metrics(final_metrics_dp , title="dp")
 
 
         
