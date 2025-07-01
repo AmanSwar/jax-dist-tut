@@ -72,10 +72,7 @@ def accum_grads_loop(
     return grads , metrics
     
 
-
-
-
-def accum_grads_scanaccum_grads_loop(
+def accum_grads_scan(
         batch : Batch,
         state : TrainState,
         key,
@@ -93,7 +90,7 @@ def accum_grads_scanaccum_grads_loop(
     def _minbatch_step(
             batch_idx : jax.Array | int
     ) -> Tuple[Pytree , Metrics]:
-        
+        #take out minibatch using dynamic slicing
         minibatch = jax.tree_util.tree_map(
             lambda x : jax.lax.dynamic_slice_in_dim(
                 x , start_index=batch_idx * min_batchSize,
@@ -102,7 +99,7 @@ def accum_grads_scanaccum_grads_loop(
             ),
             batch,
         )
-
+        # apply grad
         (_ , step_metric) , step_grad = grad_fn(
             state.params , 
             state.apply_fn,
@@ -158,3 +155,31 @@ def accum_grads_scanaccum_grads_loop(
 
 
 
+def accum_grads(
+    state: TrainState,
+    batch: Batch,
+    key,
+    num_minibatches: int,
+    loss_fn: Callable,
+    use_scan: bool = False,
+) -> Tuple[PyTree, Metrics]:
+    
+    if use_scan:
+
+        return accum_grads_scan(
+            state=state,
+            batch=batch,
+            key=key,
+            n_minbatch=num_minibatches,
+            loss_fn=loss_fn
+        )
+    
+    else:
+
+        return accum_grads_loop(
+            state=state,
+            batch=batch,
+            key=key,
+            n_minbatch=num_minibatches,
+            loss_fn=loss_fn
+        )
