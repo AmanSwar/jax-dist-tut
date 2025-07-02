@@ -152,4 +152,44 @@ def shard_module_params(
     )
 
 
+class Classifier(nn.Module):
+
+    config : ConfigDict
+
+    @nn.compact
+    def __call__(
+        self,
+        x : jax.Array,
+        train: bool
+    ) -> jax.Array:
+        
+        sharded_dense = shard_module_params(
+            nn.Dense,
+            axis_name=self.config.data_axis_name,
+            min_weight_size=self.config.min_weight_size,
+        )
+
+        x = sharded_dense(
+            features=self.config.hidden_size,
+            dtype=self.config.dtype,
+            name="input_dense",
+        )(x)
+
+        x = nn.silu(x)
+        x = nn.Dropout(
+            rate=self.config.dropout_rate,
+            deterministic=not train
+        )(x)
+
+        x = sharded_dense(
+            features=self.config.num_classes,
+            dtype=self.config.dtype,
+            name="output_dense"
+        )(x)
+
+        x = x.astype(jnp.float32)
+
+        return x
+    
+
 
