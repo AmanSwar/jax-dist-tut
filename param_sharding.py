@@ -82,3 +82,51 @@ def shard_params(
         params,
         is_leaf=lambda x: isinstance(x, nn.Partitioned),
     )
+
+
+def gather_arr_mean_grads(x: jax.Array, axis: int, axis_name: str):
+    axis_size = jax.lax.psum(1, axis_name)
+
+    @jax.custom_gradient
+    def f(x):
+        def grad_fn(g):
+            return (
+                jax.lax.psum_scatter(g, axis_name, scatter_dimension=axis, tiled=True)
+                / axis_size
+            )
+
+        return jax.lax.all_gather(x, axis_name, axis=axis, tiled=True), grad_fn
+
+    return f(x)
+
+
+@jax.named_scope("gather_params")
+def gather_params(params: Pytree, axis_name: str) -> Pytree:
+
+    def _gather(p):
+
+        if isinstance(p, nn.Partitioned) and axis_name in p.names:
+
+            param_shard = p.names
+            shared_axis = param_shard.index(axis_name)
+
+            value = gather_arr_mean_grads(
+                p.value, axis=shared_axis, axis_name=axis_name
+            )
+
+            param_shard = (
+                param_shard[:shared_axis] + (None,) + param_shard[shared_axis + 1 :]
+            )
+
+            if any([name is not None for name in param_shard]):
+                return nn.Partitioned(value, param_shard)
+
+            else:
+                return value
+
+        else:
+            return p
+
+    return jax.tree_util.tree_map(
+        _gather, params, is_leaf=lambda x: isinstance(x, nn.Partitioned)
+    )
