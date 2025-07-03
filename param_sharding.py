@@ -17,10 +17,21 @@ from jax.sharding import PartitionSpec as P
 from ml_collections import ConfigDict
 from absl import logging
 
-from util import Pytree, TrainState, Batch
+from util import Pytree, TrainState, Batch , Metrics , accum_grads
 
 # configurations to be used
-# model config
+
+
+# data config
+DATA_CONFIG = ConfigDict(
+    dict(
+        batch_size=128,
+        num_classes=10,
+        input_size=784,
+    )
+)
+
+#model config
 MODEL_CONFIG = ConfigDict(
     dict(
         hidden_size=512,
@@ -32,21 +43,13 @@ MODEL_CONFIG = ConfigDict(
     )
 )
 
-# data config
-DATA_CONFIG = ConfigDict(
-    dict(
-        batch_size=128,
-        num_classes=10,
-        input_size=784,
-    )
-)
-
 # main config obj
 config = ConfigDict(
     dict(
         model=MODEL_CONFIG,
         data=DATA_CONFIG,
         seed=6969,
+        num_minibatches=4
     )
 )
 
@@ -316,3 +319,65 @@ def sync_gradients(
     return jax.tree_util.tree_map(
         _sync_grad, grads, is_leaf=lambda x: isinstance(x, nn.Partitioned)
     )
+def loss_fn(
+        params,
+        apply_fn,
+        batch,
+        rng
+):
+    
+    dropout_rng = fold_rng_over_axis(rng , CONFIG.data_axis_name)
+    logits = apply_fn({"params" : params} , batch.inputs , train=True , rngs={"dropout" : dropout_rng})
+
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits , batch.labels)
+
+    correct_pred = jnp.equal(jnp.argmax(logits , axis=-1) , batch.labels)
+
+    bs =batch.inputs.shape[0]
+    step_metrics = {"loss" : (loss.sum() , bs) , "accuracy" : (correct_pred.sum() , bs)}
+    loss = loss.mean()
+
+    return loss , step_metrics
+
+def train_step_fsdp(
+        state : TrainState,
+        metrics : Metrics,
+        batch : Batch
+):
+    rng , step_rng = jax.random.split(state.rng)
+
+    grads , step_metrics = accum_grads(
+        state,
+        batch,
+        step_rng,
+        config.num_minibatches,
+        loss_fn=loss_fn
+    )
+
+    with jax.named_scope("sync_grad"):
+        grads = sync_gradients(grads , (config.data_axis_name,))
+
+    new_state = state.apply_gradients(grads=grads , rng=rng)
+
+    with jax.named_scope("synch_metrics"):
+
+        step_metrics = jax.tree_util.tree_map(
+            lambda x : jax.lax.psum(
+                x,
+                axis_name=config.data_axis_name
+                ),
+                step_metrics
+            )
+    
+    if metrics is None:
+        metrics = step_metrics
+
+    else:
+        metrics = jax.tree_util.tree_map(
+            jnp.add,
+            metrics,
+            step_metrics
+        )
+
+
+    return new_state , metrics
