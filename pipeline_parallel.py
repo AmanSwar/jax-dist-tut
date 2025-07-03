@@ -435,3 +435,45 @@ batch = Batch(
 
             
 
+def init_fn(rng: jax.random.PRNGKey, x: jax.Array, model: nn.Module) -> TrainState:
+    init_rng, rng = jax.random.split(rng)
+    variables = model.init({"params": init_rng}, x, train=False)
+    params = variables.pop("params")
+    state = TrainState.create(
+        apply_fn=model.apply,
+        params=params,
+        tx=optimizer,
+        rng=rng,
+    )
+    return state
+
+
+init_pp_fn = shard_map(
+    functools.partial(init_fn, model=model_pp),
+    mesh,
+    in_specs=(P(), P(config.data_axis_name)),
+    out_specs=P(),
+    check_rep=False,
+)
+state_pp_shapes = jax.eval_shape(init_pp_fn, model_init_rng, batch.inputs)
+state_pp_specs = nn.get_partition_spec(state_pp_shapes)
+
+
+init_pp_fn = jax.jit(
+    shard_map(
+        functools.partial(init_fn, model=model_pp),
+        mesh,
+        in_specs=(P(), P(config.data_axis_name)),
+        out_specs=state_pp_specs,
+        check_rep=False,
+    ),
+)
+state_pp = init_pp_fn(model_init_rng, batch.inputs)
+
+pprint(
+    tree_map(lambda x: x.shape, state_pp.params["pipeline"]["sharded"]["mlp_layers"]["block"])
+)
+
+
+
+
