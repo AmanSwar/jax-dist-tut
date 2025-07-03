@@ -193,3 +193,55 @@ def execute_pipeline_step(
 
 
 
+@jax.named_scope("pipeline")
+def execute_pipeline(
+    module : nn.Module,
+    x : jax.Array,
+    *args,
+    num_microbatches : int,
+    model_axis_name : str,
+    **kwargs
+) -> jax.Array:
+    
+    num_stages = jax.lax.psum(1 , model_axis_name)
+
+    batch_size = x.shape[0]
+
+    microbatch_size = batch_size // num_microbatches
+    microbatches = jnp.reshape(x , (num_microbatches , microbatch_size , *x.shape[1:]))
+
+    inputs = jnp.concatenate(
+        [
+            microbatches,
+            jnp.zeros((num_stages -1 , *microbatches.shape[1:]), dtype=microbatches.dtype)
+        ],
+        axis=0
+    )
+
+    state = jnp.zeros_like(microbatches[0])
+
+    n_iter = inputs.shape[0]
+
+    _ , outputs = nn.scan(
+        functools.partial(
+            execute_pipeline_step,
+            *args,
+            model_axis_name=model_axis_name,
+            **kwargs,
+        ),
+        variable_broadcast = {"params" : True},
+        split_rngs = {"params" : False , "dropout" : True},
+        length=n_iter,
+        in_axes=0,
+        out_axes=0,
+    )(module , state , inputs)
+
+
+    outputs = jnp.concatenate(outputs[-num_microbatches:] , axis=0)
+
+    return outputs
+
+
+
+
+
