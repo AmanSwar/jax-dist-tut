@@ -372,10 +372,64 @@ class PPClassifier(nn.Module):
 
 
 
+data_config = ConfigDict(
+    dict(
+        batch_size=128,
+        num_classes=10,
+        input_size=784,
+    )
+)
+model_config = ConfigDict(
+    dict(
+        hidden_size=512,
+        mlp_expansion=1,
+        dropout_rate=0.1,
+        num_layers=8,
+        dtype=jnp.float32,
+        num_classes=data_config.num_classes,
+        remat=(),
+        data_axis_name="data",
+        model_axis_name="model",
+        model_axis_size=4,
+        num_microbatches=8,
+    )
+)
+model_config.num_layers //= model_config.model_axis_size  # Layers distributed over model axis.
+optimizer_config = ConfigDict(
+    dict(
+        learning_rate=1e-3,
+        num_minibatches=1,
+    )
+)
+config = ConfigDict(
+    dict(
+        model=model_config,
+        optimizer=optimizer_config,
+        data=data_config,
+        data_axis_name=model_config.data_axis_name,
+        model_axis_name=model_config.model_axis_name,
+        model_axis_size=model_config.model_axis_size,
+        seed=42,
+    )
+)
+
+device_array = np.array(jax.devices()).reshape(-1, config.model_axis_size)
+mesh = Mesh(device_array, (config.data_axis_name, config.model_axis_name))
+
+model_pp = PPClassifier(config=model_config)
+optimizer = optax.adamw(
+    learning_rate=config.optimizer.learning_rate,
+)
 
 
-
-
+rng = jax.random.PRNGKey(config.seed)
+model_init_rng, data_inputs_rng, data_labels_rng = jax.random.split(rng, 3)
+batch = Batch(
+    inputs=jax.random.normal(data_inputs_rng, (config.data.batch_size, config.data.input_size)),
+    labels=jax.random.randint(
+        data_labels_rng, (config.data.batch_size,), 0, config.data.num_classes
+    ),
+)
 
 
 
