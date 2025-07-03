@@ -17,8 +17,10 @@ from jax.sharding import PartitionSpec as P
 from ml_collections import ConfigDict
 from absl import logging
 
-from util import Pytree , TrainState , Batch
+from util import Pytree, TrainState, Batch
 
+# configurations to be used
+# model config
 MODEL_CONFIG = ConfigDict(
     dict(
         hidden_size=512,
@@ -26,10 +28,11 @@ MODEL_CONFIG = ConfigDict(
         dtype=jnp.bfloat16,
         num_classes=DATA_CONFIG.num_classes,
         data_axis_name="data",
-        lr=1e-4
+        lr=1e-4,
     )
 )
 
+# data config
 DATA_CONFIG = ConfigDict(
     dict(
         batch_size=128,
@@ -38,10 +41,11 @@ DATA_CONFIG = ConfigDict(
     )
 )
 
+# main config obj
 config = ConfigDict(
     dict(
-        model = MODEL_CONFIG,
-        data = DATA_CONFIG,
+        model=MODEL_CONFIG,
+        data=DATA_CONFIG,
         seed=6969,
     )
 )
@@ -58,6 +62,9 @@ def shard_params(
 
     # function to apply partion
     def _split(x):
+        # Conditions where I don't have to shard the params
+        # - when its already paritioned
+        # - if its less than min_size
         # cond1 : if already Partitioned
         if isinstance(x, nn.Partitioned):
 
@@ -81,11 +88,13 @@ def shard_params(
             return x
 
         else:
+            # we are going to shared alonog the largest dim first
             shape = value.shape
             idx = np.argsort(shape)[::-1]  # shape in descending order of largest axis
 
+            # iterate over every dim to check
             for i in idx:
-
+                # check condition -> can the dim be equally partitioned across different devices or not
                 if shape[i] % axis_size == 0 and names[i] is None:
 
                     split_size = shape[i] // axis_size
@@ -93,6 +102,7 @@ def shard_params(
                         value=lax.dynamic_slice_in_dim(
                             value, axis_idx * split_size, split_size, axis=i
                         ),
+                        # add axis name in the current index
                         names=names[:i] + (axis_name,) + names[i + 1 :],
                     )
 
@@ -111,6 +121,7 @@ def shard_params(
     )
 
 
+# now a function which cummulates all the value -> finds gradient -> distribute the gradients
 def gather_arr_mean_grads(x: jax.Array, axis: int, axis_name: str):
     axis_size = jax.lax.psum(1, axis_name)
 
@@ -127,6 +138,7 @@ def gather_arr_mean_grads(x: jax.Array, axis: int, axis_name: str):
     return f(x)
 
 
+# launch function for grather_arr_mean_grads
 @jax.named_scope("gather_params")
 def gather_params(params: Pytree, axis_name: str) -> Pytree:
 
@@ -159,6 +171,7 @@ def gather_params(params: Pytree, axis_name: str) -> Pytree:
     )
 
 
+# function for applying gather and sharding ops for each param
 def shard_module_params(
     target: nn.Module | Callable, axis_name: str, min_weight_size: int = 2**18
 ) -> nn.Module | Callable:
@@ -207,13 +220,9 @@ class Classifier(nn.Module):
         return x
 
 
-def init_model(
-        rng,
-        x : jax.Array,
-        model : nn.Module
-) -> TrainState:
-    init_rng , rng = jax.random.split(rng)
-    var = model.init({'params' : init_rng} , x , train=False)
+def init_model(rng, x: jax.Array, model: nn.Module) -> TrainState:
+    init_rng, rng = jax.random.split(rng)
+    var = model.init({"params": init_rng}, x, train=False)
     params = var.pop("params")
 
     state = TrainState.create(
@@ -228,7 +237,9 @@ def init_model(
     return state
 
 
-config.model.min_weight_size = 2**4  #set to smaller one cuz this is a experimental script
+config.model.min_weight_size = (
+    2**4
+)  # set to smaller one cuz this is a experimental script
 
 model_fsdp = Classifier(config=config.model)
 devices = np.array(jax.devices())
@@ -236,9 +247,9 @@ devices = np.array(jax.devices())
 mesh = Mesh(devices, (config.data_axis_name,))
 
 init_fsdp_fn = shard_map(
-    functools.partial(init_model , model=model_fsdp),
+    functools.partial(init_model, model=model_fsdp),
     mesh,
-    in_specs=(P() , P(config.model.data_axis_name)),
+    in_specs=(P(), P(config.model.data_axis_name)),
     out_specs=P(),
     check_rep=False,
 )
@@ -271,3 +282,37 @@ batch = Batch(
     ),
 )
 state_fsdp = init_fsdp_fn(model_init_rng, batch.inputs)
+
+
+# function to handle the grads of the axes which are not replicated
+# but have different grads across devices -> average over it
+def sync_gradients(
+    grads: Pytree,
+    axis_names: Sequence[str],
+) -> Pytree:
+
+    def _sync_grad(g):
+
+        if isinstance(g, nn.Partitioned):
+
+            repl_axis_names = [
+                name
+                for name in axis_names
+                if name not in jax.tree_util.tree_leaves(g.names)
+            ]
+
+            if len(repl_axis_names) == 0:
+                return g
+
+            else:
+                return g.replace(
+                    value=jax.lax.pmean(g.value, axis_name=repl_axis_names)
+                )
+
+        else:
+
+            return jax.lax.pmean(g, axis_name=axis_names)
+
+    return jax.tree_util.tree_map(
+        _sync_grad, grads, is_leaf=lambda x: isinstance(x, nn.Partitioned)
+    )
