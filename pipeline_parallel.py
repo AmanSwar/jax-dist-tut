@@ -18,6 +18,7 @@ from flax.core.frozen_dict import FrozenDict
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from jax.tree_util import tree_map
 from ml_collections import ConfigDict
 
 
@@ -95,3 +96,69 @@ class MLPLayers(nn.Module):
         )(block, x, ())
         
         return x
+
+
+def stack_params(
+        params : PyTree,
+        axis_name : str,
+        axis : int = 0,
+        mask_except : jax.Array | int | None
+    ) -> PyTree:
+
+
+    def _stack(x):
+
+        if isinstance(x , nn.Partitioned):
+
+            value , names = x.value , x.names
+
+        else:
+            value , names = x , (None ,) * x.ndim
+
+        if mask_except is not None:
+
+            axis_index = jax.lax.axis_index(axis_name)
+            value = jnp.expand_dims(value , axis)
+
+        value = jnp.expand_dims(value , axis)
+        names = names[:axis] + (axis_name , ) + names[axis + 1 :]
+
+        return nn.Partitioned(value , names=names)
+    
+    return tree_map(
+        _stack,
+        params,
+        is_leaf= lambda x : isinstance(x , nn.Partitioned)
+    )
+
+
+
+def unstack_params(
+        params : PyTree,
+        axis_name : str
+):
+    def _unstack(x: Parameter) -> Parameter:
+        if isinstance(x, nn.Partitioned) and axis_name in x.names:
+            value = x.value
+            names = x.names
+            axis_idx = names.index(axis_name)
+            value = value.squeeze(axis_idx)
+            names = names[:axis_idx] + names[axis_idx + 1 :]
+            if all([n is None for n in names]):
+                return value
+            else:
+                return nn.Partitioned(value, names=names)
+        else:
+            return x
+        
+    
+    return tree_map(
+        _unstack,
+        params,
+        is_leaf= lambda x : isinstance(x , nn.Partitioned)
+
+    )
+        
+
+
+        
