@@ -161,4 +161,35 @@ def unstack_params(
         
 
 
-        
+
+def execute_pipeline_step(
+        module : nn.Module,
+        state : jax.Array,
+        input : jax.Array,
+        *args,
+        model_axis_name : str,
+        **kwargs
+) -> Tuple[jax.Array , jax.Array]:
+    
+    #total no. of stage = total axis name
+    num_stages = jax.lax.psum(1 , model_axis_name)
+    # indexify the axis names
+    stage_index = jax.lax.axis_index(model_axis_name)
+
+
+    state = jnp.where(stage_index == 0 , input , state)
+    state = module(state , *args , **kwargs)
+
+
+    output = jnp.where(stage_index == num_stages -1 , state , jnp.zeros_like(state))
+
+    state = jax.lax.ppermute(
+        state,
+        model_axis_name,
+        perm= [(i , (i+1) % num_stages) for i in range(num_stages)]
+    )
+
+    return (state , output)
+
+
+
