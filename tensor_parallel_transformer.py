@@ -423,3 +423,15 @@ class InputEmbedding(nn.Module):
         x = PositionalEncoding(config=self.config, name="pos_enc")(x)
 
         return x
+
+
+class TPInputEmbedding(nn.Module):
+    config: ConfigDict
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        return ModelParallelWrapper(
+            model_axis_name=self.config.model_axis_name, # type: ignore
+            module_fn=partial(InputEmbedding, config=self.config),
+            name="module",
+        )(x)
