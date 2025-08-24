@@ -10,3 +10,8 @@ from pipeline_parallel import ModelParallelWrapper
 from tensor_paral import MLPBlockInput , MLPBlockOutput , scale_init
 
 
+PyTree = Any
+Parameter = jax.Array | nn.Partitioned
+Metrics = Dict[str, Tuple[jax.Array, ...]]
+
+
