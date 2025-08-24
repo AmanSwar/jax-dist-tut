@@ -448,3 +448,74 @@ def split_array_over_mesh(x: jax.Array, axis_name: str, split_axis: int) -> jax.
         axis=split_axis,
     )
     return x
+
+
+class TPOutputLayer(nn.Module):
+    config: ConfigDict
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+
+        x = jax.lax.all_gather(
+            x, axis_name=self.config.model_axis_name, axis=-1, tiled=True
+        )
+
+        x = split_array_over_mesh(
+            x, axis_name=self.config.model_axis_name, split_axis=1
+        )
+
+        norm_fn = shard_module_params(
+            nn.RMSNorm,
+            axis_name=self.config.model_axis_name,
+            min_weight_size=self.config.fsdp.min_weight_size,
+        )
+
+        dense_fn = shard_module_params(
+            nn.Dense,
+            axis_name=self.config.model_axis_name,
+            min_weight_size=self.config.fsdp.min_weight_size,
+        )
+
+        x = norm_fn(dtype=self.config.dtype, name="out_norm")(x)
+
+        x = dense_fn(
+            features=self.config.num_outputs,
+            dtype=jnp.float32,
+            name="output_layer",
+        )(x)
+
+        return x
+
+
+class Transformer(nn.Module):
+    
+    config: ConfigDict
+    block_fn: Any = TPTransformerBlock
+
+    @nn.compact
+    def __call__(
+        self, x: jax.Array, train: bool, mask: jax.Array | None = None
+    ) -> jax.Array:
+    
+        if mask is None and self.config.causal_mask:
+            mask = nn.make_causal_mask(x, dtype=jnp.bool_)
+    
+        x = TPInputEmbedding(
+            config=self.config,
+            name="input_embedding",
+        )(x)
+    
+        x = TransformerBackbone(
+            config=self.config,
+            train=train,
+            mask=mask,
+            block_fn=self.block_fn,
+            name="backbone",
+        )(x)
+    
+        x = TPOutputLayer(
+            config=self.config,
+            name="output_layer",
+        )(x)
+    
+        return x
