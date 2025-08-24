@@ -351,6 +351,21 @@ def gather_params(params: PyTree, axis_name: str) -> PyTree:
     )
 
 
+def shard_module_params(
+    target: nn.Module | Callable, axis_name: str, min_weight_size: int = 2**18
+) -> nn.Module | Callable:
+    
+    return nn.map_variables(
+        target,
+        trans_in_fn=functools.partial(gather_params, axis_name=axis_name),
+        trans_out_fn=functools.partial(
+            shard_params, axis_name=axis_name, min_weight_size=min_weight_size
+        ),
+        mapped_collections="params",
+        mutable=True,
+    )
+
+
 def sync_grads(
     grads : Pytree,
     axis_names = Sequence[str]
