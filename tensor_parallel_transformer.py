@@ -13,5 +13,6 @@ from pipeline_parallel import ModelParallelWrapper
 from tensor_paral import MLPBlockInput , MLPBlockOutput
 from tensor_parallel_async import TPAsyncDense ,TPAsyncMLPBlock , TPNorm
 
-
-
+PyTree = Any
+Parameter = jax.Array | nn.Partitioned
+Metrics = Dict[str, Tuple[jax.Array, ...]]
