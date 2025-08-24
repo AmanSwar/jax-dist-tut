@@ -195,7 +195,7 @@ class TPTransformerBlock(nn.Module):
         attn_out = nn.Dropout(
             rate=self.config.dropout_rate, deterministic=not self.train
         )(attn_out)
-        
+
         x = x + attn_out
         mlp_layer = prepare_module(TPAsyncMLPBlock, "MLP", self.config)
         mlp_out = mlp_layer(
@@ -203,11 +203,46 @@ class TPTransformerBlock(nn.Module):
             train=self.train,
             name="mlp",
         )(x)
-       
+
         mlp_out = nn.Dropout(
             rate=self.config.dropout_rate, deterministic=not self.train
         )(mlp_out)
-       
+
         x = x + mlp_out
-       
+
         return x
+
+
+class QKVMLPDense(nn.Module):
+
+    config: ConfigDict
+    num_heads: int
+    head_dim: int
+    mlp_dim: int
+    kernel_init: Callable
+    use_bias: bool = False
+
+    @nn.compact
+    def __call__(
+        self, x: jax.Array
+    ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array, jax.Array]]:
+
+        h = MLPBlockInput(
+            config=self.config,
+            features=self.mlp_dim,
+            kernel_init=self.kernel_init,
+            use_bias=self.use_bias,
+            use_norm=False,
+            name="mlp",
+        )(x)
+
+        q, k, v = QKVDense(
+            config=self.config,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            kernel_init=self.kernel_init,
+            use_bias=self.use_bias,
+            name="qkv",
+        )(x)
+
+        return h, (q, k, v)
