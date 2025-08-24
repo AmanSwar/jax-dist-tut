@@ -77,20 +77,40 @@ def dot_product_attention(
 
     dtype = query.dtype
     scale = num_features**-0.5
-    
+
     query = query * scale
     query = query.astype(softmax_dtype)
-    
+
     key = key.astype(softmax_dtype)
     weights = jnp.einsum("...qhd,...khd->...hqk", query, key)
-    
+
     if mask is not None:
         weights = jnp.where(mask, weights, jnp.finfo(softmax_dtype).min)
-    
+
     weights = nn.softmax(weights, axis=-1)
     weights = weights.astype(dtype)
-    
+
     new_vals = jnp.einsum("...hqk,...khd->...qhd", weights, value)
     new_vals = new_vals.astype(dtype)
-    
+
     return new_vals
+
+
+class AttnOut(nn.Module):
+    
+    config: ConfigDict
+    features: int
+    kernel_init: Callable = nn.initializers.lecun_normal()
+    use_bias: bool = True
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        x = nn.DenseGeneral(
+            features=self.features,
+            axis=(-2, -1),
+            kernel_init=self.kernel_init,
+            use_bias=self.use_bias,
+            dtype=self.config.dtype,
+            name="out",
+        )(x)
+        return x
