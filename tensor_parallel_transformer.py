@@ -273,3 +273,54 @@ class AttnMLPOut(nn.Module):
         )(attn_v)
         out = mlp_out + attn_out
         return out
+
+
+class TPTransformerParallelBlock(nn.Module):
+    config: ConfigDict
+    train: bool
+    mask: jax.Array | None = None
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        
+        tp_size = jax.lax.psum(1, self.config.model_axis_name)
+        input_features = x.shape[-1]
+        residual = x
+        
+        x = TPNorm(config=self.config, name="pre_norm")(x)
+        
+        h, (q, k, v) = TPAsyncDense(
+            dense_fn= partial(
+                QKVMLPDense,
+                config=self.config,
+                num_heads=self.config.num_heads // tp_size,
+                head_dim=self.config.head_dim,
+                mlp_dim=self.config.hidden_size * self.config.mlp_expansion // tp_size,
+            ),
+            model_axis_name=self.config.model_axis_name,
+            tp_mode="gather",
+            kernel_init_adjustment=tp_size**-0.5,
+            name="hqkv",
+        )(x)
+        
+        v = dot_product_attention(q, k, v, self.mask)
+        
+        block_out = TPAsyncDense(
+            dense_fn= partial(
+                AttnMLPOut,
+                config=self.config,
+                features=input_features,
+            ),
+            model_axis_name=self.config.model_axis_name,
+            tp_mode="scatter",
+            kernel_init_adjustment=tp_size**-0.5,
+            name="out",
+        )((h, v))
+        
+        block_out = nn.Dropout(
+            rate=self.config.dropout_rate, deterministic=not self.train
+        )(block_out)
+        
+        out = residual + block_out
+        
+        return out
