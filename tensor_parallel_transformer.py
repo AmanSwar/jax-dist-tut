@@ -246,3 +246,30 @@ class QKVMLPDense(nn.Module):
         )(x)
 
         return h, (q, k, v)
+
+
+class AttnMLPOut(nn.Module):
+    config: ConfigDict
+    features: int
+    kernel_init: Callable = nn.initializers.lecun_normal()
+    use_bias: bool = True
+
+    @nn.compact
+    def __call__(self, x: Tuple[jax.Array, jax.Array]) -> jax.Array:
+        mlp_h, attn_v = x
+        mlp_out = MLPBlockOutput(
+            config=self.config,
+            features=self.features,
+            kernel_init=self.kernel_init,
+            use_bias=self.use_bias,
+            name="mlp",
+        )(mlp_h)
+        attn_out = AttnOut(
+            config=self.config,
+            features=self.features,
+            kernel_init=self.kernel_init,
+            use_bias=self.use_bias,
+            name="attn",
+        )(attn_v)
+        out = mlp_out + attn_out
+        return out
