@@ -11,11 +11,11 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh
+from jax.sharding import Mesh 
 from ml_collections import ConfigDict
 
 
-from data_paral import fold_rng_over_axis
+from data_paral import fold_rng_over_axis , sync_grads
 from pipeline_parallel import ModelParallelWrapper
 
 PyTree = Any
@@ -310,3 +310,41 @@ def loss_fn(
     }
     loss = loss.mean()
     return loss, step_metrics
+
+
+def train_step(
+    state : TrainState,
+    metrics : Metrics | None,
+    batch : Batch,
+    config : ConfigDict,
+    loss_fn : Callable = loss_fn
+) -> Tuple[TrainState , Metrics]:
+
+    rng, step_rng = jax.random.split(state.rng)
+    grads, step_metrics = accumulate_gradients(
+        state,
+        batch,
+        step_rng,
+        config.optimizer.num_minibatches,
+        loss_fn = partial(loss_fn, config=config),
+    )
+
+    with jax.named_scope("sync_gradients"):
+        grads = sync_grads(grads, (config.data_axis_name, config.model_axis_name))
+    new_state = state.apply_gradients(grads=grads, rng=rng)
+
+    with jax.named_scope("sync_metrics"):
+        step_metrics = jax.tree_map(
+            lambda x: jax.lax.psum(
+                x, axis_name=(config.data_axis_name, config.model_axis_name)
+            ),
+            step_metrics,
+        )
+
+    if metrics is None:
+        metrics = step_metrics
+
+    else:
+        metrics = jax.tree_map(jnp.add, metrics, step_metrics)
+
+    return new_state , metrics
