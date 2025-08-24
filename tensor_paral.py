@@ -273,3 +273,40 @@ def init_tp(
         rng=rng,
     )
     return state
+
+
+def loss_fn(
+    params : PyTree,
+    apply_fn : Any,
+    batch : Batch,
+    rng : jax.Array,
+    config : ConfigDict
+) -> Tuple[jax.Array , Dict[str , Any]]:
+
+    dropout_rng = fold_rng_over_axis(
+        rng , (config.data_axis_name , config.model_axis_name)
+    )
+
+    logits = apply_fn(
+        {"params" : params},
+        batch.inputs,
+        train=True,
+        rngs={"dropout" : dropout_rng}
+    )
+
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch.labels)
+    correct_pred = jnp.equal(jnp.argmax(logits, axis=-1), batch.labels)
+    batch_size = np.prod(batch.labels.shape)
+
+    # maskking out loss and accuracy for model devices except first one
+    model_idx = jax.lax.axis_index(config.model_axis_name)
+    loss = jnp.where(model_idx != 0, 0.0, loss)
+    correct_pred = jnp.where(model_idx != 0, False, correct_pred)
+    batch_size = jnp.where(model_idx != 0, 0, batch_size)
+
+    step_metrics = {
+        "loss": (loss.sum(), batch_size),
+        "accuracy": (correct_pred.sum(), batch_size),
+    }
+    loss = loss.mean()
+    return loss, step_metrics
