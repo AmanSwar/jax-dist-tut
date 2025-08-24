@@ -282,13 +282,13 @@ class TPTransformerParallelBlock(nn.Module):
 
     @nn.compact
     def __call__(self, x: jax.Array) -> jax.Array:
-        
+
         tp_size = jax.lax.psum(1, self.config.model_axis_name)
         input_features = x.shape[-1]
         residual = x
-        
+
         x = TPNorm(config=self.config, name="pre_norm")(x)
-        
+
         h, (q, k, v) = TPAsyncDense(
             dense_fn= partial(
                 QKVMLPDense,
@@ -302,9 +302,9 @@ class TPTransformerParallelBlock(nn.Module):
             kernel_init_adjustment=tp_size**-0.5,
             name="hqkv",
         )(x)
-        
+
         v = dot_product_attention(q, k, v, self.mask)
-        
+
         block_out = TPAsyncDense(
             dense_fn= partial(
                 AttnMLPOut,
@@ -316,11 +316,44 @@ class TPTransformerParallelBlock(nn.Module):
             kernel_init_adjustment=tp_size**-0.5,
             name="out",
         )((h, v))
-        
+
         block_out = nn.Dropout(
             rate=self.config.dropout_rate, deterministic=not self.train
         )(block_out)
-        
+
         out = residual + block_out
-        
+
         return out
+
+
+class TransformerBackbone(nn.Module):
+    
+    config: ConfigDict
+    train: bool
+    mask: jax.Array | None = None
+    block_fn: Any = TPTransformerBlock
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+    
+        block_fn = prepare_module(
+            self.block_fn,
+            "Block",
+            self.config,
+        )
+    
+        block = block_fn(
+            config=self.config, train=self.train, mask=self.mask, name="block"
+        )
+    
+        x, _ = nn.scan(
+            lambda module, carry, _: (module(carry), None),
+            variable_axes={"params": 0},
+            split_rngs={"params": True, "dropout": True},
+            length=self.config.num_layers,
+            metadata_params={
+                "partition_name": None
+            }, 
+        )(block, x, ())
+    
+        return x
