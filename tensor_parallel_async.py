@@ -209,3 +209,46 @@ class TPNorm(nn.Module):
             name="norm",
         )(x)
         return x
+
+
+class TPAsyncMLPBlock(nn.Module):
+    config: ConfigDict
+    train: bool
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+
+        tp_size = jax.lax.psum(1, self.config.model_axis_name)
+        input_features = x.shape[-1]
+
+        x = TPNorm(config=self.config, name="pre_norm")(x)
+
+        # Input dense layer with async gather.
+        x = TPAsyncDense(
+            dense_fn=partial(
+                MLPBlockInput,
+                config=self.config,
+                features=self.config.hidden_size * self.config.mlp_expansion // tp_size,
+                use_norm=False,
+            ),
+            model_axis_name=self.config.model_axis_name,
+            tp_mode="gather",
+            kernel_init_adjustment=tp_size**-0.5,
+            name="input",
+        )(x)
+
+
+        x = TPAsyncDense(
+            dense_fn=functools.partial(
+                MLPBlockOutput,
+                config=self.config,
+                features=input_features,
+            ),
+            model_axis_name=self.config.model_axis_name,
+            tp_mode="scatter",
+            kernel_init_adjustment=tp_size**-0.5,
+            name="output",
+        )(x)
+
+        
+        return x
