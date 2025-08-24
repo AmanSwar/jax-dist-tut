@@ -454,9 +454,7 @@ device_array = np.array(jax.devices()).reshape(-1, config.model_axis_size)
 mesh = Mesh(device_array, (config.data_axis_name, config.model_axis_name))
 
 model_pp = PPClassifier(config=model_config)
-optimizer = optax.adamw(
-    learning_rate=config.optimizer.learning_rate,
-)
+
 
 
 rng = jax.random.PRNGKey(config.seed)
@@ -472,40 +470,10 @@ batch = Batch(
 
             
 
-def init_fn(rng: jax.random.PRNGKey, x: jax.Array, model: nn.Module) -> TrainState:
-    init_rng, rng = jax.random.split(rng)
-    variables = model.init({"params": init_rng}, x, train=False)
-    params = variables.pop("params")
-    state = TrainState.create(
-        apply_fn=model.apply,
-        params=params,
-        tx=optimizer,
-        rng=rng,
-    )
-    return state
 
 
-init_pp_fn = shard_map(
-    functools.partial(init_fn, model=model_pp),
-    mesh,
-    in_specs=(P(), P(config.data_axis_name)),
-    out_specs=P(),
-    check_rep=False,
-)
-state_pp_shapes = jax.eval_shape(init_pp_fn, model_init_rng, batch.inputs)
-state_pp_specs = nn.get_partition_spec(state_pp_shapes)
 
 
-init_pp_fn = jax.jit(
-    shard_map(
-        functools.partial(init_fn, model=model_pp),
-        mesh,
-        in_specs=(P(), P(config.data_axis_name)),
-        out_specs=state_pp_specs,
-        check_rep=False,
-    ),
-)
-state_pp = init_pp_fn(model_init_rng, batch.inputs)
 
 pprint(
     tree_map(lambda x: x.shape, state_pp.params["pipeline"]["sharded"]["mlp_layers"]["block"])
@@ -572,27 +540,79 @@ def train_step_pp(
         metrics = tree_map(jnp.add, metrics, step_metrics)
     return new_state, metrics
 
-train_step_pp_fn = jax.jit(
-    shard_map(
-        train_step_pp,
-        mesh,
-        in_specs=(state_pp_specs, P(), P(config.data_axis_name)),
-        out_specs=(state_pp_specs, P()),
-        check_rep=False,
-    ),
-    donate_argnames=("state", "metrics"),
-)
-_, metric_shapes = jax.eval_shape(
-    train_step_pp_fn,
-    state_pp,
-    None,
-    batch,
-)
-metrics_pp = tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
-state_pp, metrics_pp = train_step_pp_fn(state_pp, metrics_pp, batch)
 
-for _ in range(15):
-    state_pp, metrics_pp = train_step_pp_fn(state_pp, metrics_pp, batch)
-final_metrics_pp = tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
-state_pp, final_metrics_pp = train_step_pp_fn(state_pp, final_metrics_pp, batch)
-print_metrics(final_metrics_pp, title="Final Metrics - Pipeline")
+
+def train_pipeline_model(
+        config : ConfigDict,
+        mesh : Mesh,
+        batch : Batch,
+        model_init_rng : jax.Array,
+        num_steps : int
+) -> TrainState:
+    
+    model = PPClassifier(config=config.model)
+    optimizer = optax.adamw(
+        learning_rate=config.optimizer.learning_rate,
+    )
+
+
+    def init_fn(rng: jax.random.PRNGKey, x: jax.Array, model: nn.Module) -> TrainState:
+        init_rng, rng = jax.random.split(rng)
+        variables = model.init({"params": init_rng}, x, train=False)
+        params = variables.pop("params")
+        state = TrainState.create(
+            apply_fn=model.apply,
+            params=params,
+            tx=optimizer,
+            rng=rng,
+        )
+        return state
+    
+    init_pp_fn = shard_map(
+        functools.partial(init_fn, model=model_pp),
+        mesh,
+        in_specs=(P(), P(config.data_axis_name)),
+        out_specs=P(),
+        check_rep=False,
+    )
+    state_pp_shapes = jax.eval_shape(init_pp_fn, model_init_rng, batch.inputs)
+    state_pp_specs = nn.get_partition_spec(state_pp_shapes)
+
+
+    init_pp_fn = jax.jit(
+        shard_map(
+            functools.partial(init_fn, model=model_pp),
+            mesh,
+            in_specs=(P(), P(config.data_axis_name)),
+            out_specs=state_pp_specs,
+            check_rep=False,
+        ),
+    )
+    state_pp = init_pp_fn(model_init_rng, batch.inputs)
+
+    train_step_pp_fn = jax.jit(
+        shard_map(
+            train_step_pp,
+            mesh,
+            in_specs=(state_pp_specs, P(), P(config.data_axis_name)),
+            out_specs=(state_pp_specs, P()),
+            check_rep=False,
+        ),
+        donate_argnames=("state", "metrics"),
+    )
+    _, metric_shapes = jax.eval_shape(
+        train_step_pp_fn,
+        state_pp,
+        None,
+        batch,
+    )
+    metrics_pp = tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
+
+    for _ in range(num_steps):
+        state_pp, metrics_pp = train_step_pp_fn(state_pp, metrics_pp, batch)    
+
+    
+
+
+
+
