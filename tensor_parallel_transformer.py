@@ -172,5 +172,42 @@ def prepare_module(
 
     if config.get("remat", None) is not None and layer_name in config.remat:
         layer = nn.remat(layer, prevent_cse=False)
-    
+
     return layer
+
+
+class TPTransformerBlock(nn.Module):
+    config: ConfigDict
+    train: bool
+    mask: jax.Array | None = None
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+
+        attn_layer = prepare_module(TPMultiHeadAttn, "Attn", self.config)
+        attn_out = attn_layer(
+            config=self.config,
+            train=self.train,
+            mask=self.mask,
+            name="attn",
+        )(x)
+
+        attn_out = nn.Dropout(
+            rate=self.config.dropout_rate, deterministic=not self.train
+        )(attn_out)
+        
+        x = x + attn_out
+        mlp_layer = prepare_module(TPAsyncMLPBlock, "MLP", self.config)
+        mlp_out = mlp_layer(
+            config=self.config,
+            train=self.train,
+            name="mlp",
+        )(x)
+       
+        mlp_out = nn.Dropout(
+            rate=self.config.dropout_rate, deterministic=not self.train
+        )(mlp_out)
+       
+        x = x + mlp_out
+       
+        return x
