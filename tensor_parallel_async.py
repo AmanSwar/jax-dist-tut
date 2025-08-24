@@ -66,3 +66,29 @@ def async_gather_split(x: jax.Array, axis_name: str) -> List[jax.Array]:
     return async_gather(x1, axis_name, shift_up=True) + async_gather(
         x2, axis_name, shift_up=False
     )
+
+
+def async_scatter(
+    xs: Sequence[PyTree], axis_name: str, shift_up: bool = True
+) -> PyTree:
+    
+    tp_size = jax.lax.psum(1, axis_name)
+
+    assert (
+        len(xs) == tp_size
+    ), f"Number of shards needs to match axis size, but got {len(xs)} with {axis_name} axis size {tp_size}."
+    
+    
+    if shift_up:
+        shift_perm = [(j, (j + 1) % tp_size) for j in range(tp_size)]
+    
+    else:
+        shift_perm = [(j, (j - 1) % tp_size) for j in range(tp_size)]
+    
+    y = xs[0]
+    
+    for x in xs[1:]:
+        y = jax.lax.ppermute(y, axis_name, perm=shift_perm)
+        y = jax.tree_util.tree_map(jnp.add, y, x)
+    
+    return y
