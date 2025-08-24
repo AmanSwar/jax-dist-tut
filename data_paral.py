@@ -261,7 +261,7 @@ train_step_dp_fn = jax.jit(
 def shard_params(
     params: PyTree, axis_name: str, min_weight_size: int = 2**18
 ) -> PyTree:
-    
+
     axis_idx = jax.lax.axis_index(axis_name)
     axis_size = jax.lax.psum(1, axis_name)
 
@@ -306,6 +306,25 @@ def shard_params(
             x, nn.Partitioned
         ),  # Consider a nn.Partitioned object as a leaf.
     )
+
+
+def gather_array_with_mean_grads(x: jax.Array, axis: int, axis_name: str):
+    axis_size = jax.lax.psum(1, axis_name)
+
+    # Define a custom gradient for the gather operation.
+    @jax.custom_gradient
+    def f(x):
+        def grad_fn(g):
+            # pmean_scatter
+            return (
+                jax.lax.psum_scatter(g, axis_name, scatter_dimension=axis, tiled=True)
+                / axis_size
+            )
+
+        return jax.lax.all_gather(x, axis_name, axis=axis, tiled=True), grad_fn
+
+    return f(x)
+
 
 
 
