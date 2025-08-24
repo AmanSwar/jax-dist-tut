@@ -258,3 +258,18 @@ def get_default_tp_classifier_config():
         )
     )
     return config
+
+
+def init_tp(
+    rng: jax.random.PRNGKey, x: jax.Array, model: nn.Module, optimizer: Callable
+) -> TrainState:
+    init_rng, rng = jax.random.split(rng)
+    variables = model.init({"params": init_rng}, x, train=False)
+    params = variables.pop("params")
+    state = TrainState.create(
+        apply_fn=model.apply,
+        params=params,
+        tx=optimizer,
+        rng=rng,
+    )
+    return state
