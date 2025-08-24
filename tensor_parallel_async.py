@@ -192,3 +192,20 @@ class TPAsyncDense(nn.Module):
         else:
             raise ValueError(f"Unknown Tensor Parallel mode: {tp_mode}")
         return y
+
+
+class TPNorm(nn.Module):
+    config: ConfigDict
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        x = ModelParallelWrapper(
+            model_axis_name=self.config.model_axis_name, # type: ignore
+            module_fn=partial(
+                nn.RMSNorm,
+                dtype=self.config.dtype,
+                axis_name=self.config.model_axis_name, # type: ignore
+            ),
+            name="norm",
+        )(x)
+        return x
