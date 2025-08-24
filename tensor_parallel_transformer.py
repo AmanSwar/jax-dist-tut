@@ -364,22 +364,22 @@ class PositionalEncoding(nn.Module):
 
     @nn.compact
     def __call__(self, x: jax.Array) -> jax.Array:
-        
+
         tp_size = jax.lax.psum(1, self.config.model_axis_name)
         tp_index = jax.lax.axis_index(self.config.model_axis_name)
         seq_len, num_feats = x.shape[-2:]
-        
+
         if self.config.positional_encoding_type == "learned":
             pos_emb = self.param(
                 "pos_emb",
                 nn.initializers.normal(stddev=0.02),
                 (seq_len, num_feats),
             )
-        
+
         elif self.config.positional_encoding_type == "sinusoidal":
-        
+
             position = jnp.arange(0, seq_len, dtype=jnp.float32)[:, None]
-        
+
             div_term = jnp.exp(
                 jnp.arange(tp_index * num_feats, (tp_index + 1) * num_feats, 2)
                 * (-np.log(10000.0) / (tp_size * num_feats))
@@ -389,17 +389,37 @@ class PositionalEncoding(nn.Module):
                 [jnp.sin(position * div_term), jnp.cos(position * div_term)], axis=-1
             )
             pos_emb = jnp.reshape(pos_emb, (seq_len, num_feats))
-        
+
         else:
             raise ValueError(
                 f"Unknown positional encoding type: {self.config.positional_encoding_type}"
             )
-        
+
         pos_emb = pos_emb.astype(
             x.dtype
         )  
 
         pos_emb = jnp.expand_dims(pos_emb, axis=range(x.ndim - 2))
         x = x + pos_emb
-        
+
+        return x
+
+
+class InputEmbedding(nn.Module):
+    config: ConfigDict
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        tp_size = jax.lax.psum(1, self.config.model_axis_name)
+
+        x = nn.Embed(
+            num_embeddings=self.config.vocab_size,
+            features=self.config.hidden_size // tp_size,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            dtype=self.config.dtype,
+            name="token_emb",
+        )(x)
+
+        x = PositionalEncoding(config=self.config, name="pos_enc")(x)
+
         return x
