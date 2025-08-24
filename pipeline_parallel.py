@@ -27,10 +27,10 @@ Parameter = jax.Array | nn.Partitioned
 Metrics = Dict[str , Tuple[jax.Array , ...]]
 
 
-from single_gpu import (
+from util import (
     Batch,
     TrainState,
-    accumulate_gradients,
+    accum_grads,
     get_num_params,
     print_metrics
 )
@@ -104,12 +104,29 @@ def stack_params(
         axis : int = 0,
         mask_except : jax.Array | int | None
     ) -> PyTree:
+    """
+    Stakcs sharded params along a givesn axis
+
+    Args:
+        params (PyTree): model parameters
+        axis_name (str): name of the axis to stakc along
+        mask_except (jax.Array | int | None): only the mask_except-th shard will be non zero
+        axis (int, optional): index of the axis to stack along
+
+    Returns:
+        PyTree: Parameters 
+    """
 
 
     def _stack(x):
+        """
+        Core stack logic - used on each leaf of a PyTree
+        Args:
+            x (jax.Array): input
+
+        """
 
         if isinstance(x , nn.Partitioned):
-
             value , names = x.value , x.names
 
         else:
@@ -137,6 +154,13 @@ def unstack_params(
         params : PyTree,
         axis_name : str
 ):
+    """
+    Unstack params along a given axis
+
+    Args:
+        params (PyTree) : params
+        axis_name (str): axis along which to unstack
+    """
     def _unstack(x: Parameter) -> Parameter:
         if isinstance(x, nn.Partitioned) and axis_name in x.names:
             value = x.value
@@ -170,13 +194,23 @@ def execute_pipeline_step(
         model_axis_name : str,
         **kwargs
 ) -> Tuple[jax.Array , jax.Array]:
+    """
+    Single micro batch pipeline step
+
+    Args:
+        module (nn.Module): stage to be executed
+        state (jax.Array): output of last stage
+        input (jax.Array): original input
+        model_axis_name (str): name of modle exis in the mesh
+
+    Returns:
+        Tuple[jax.Array , jax.Array]: _description_
+    """
     
     #total no. of stage = total axis name
     num_stages = jax.lax.psum(1 , model_axis_name)
     # indexify the axis names
     stage_index = jax.lax.axis_index(model_axis_name)
-
-
     state = jnp.where(stage_index == 0 , input , state)
     state = module(state , *args , **kwargs)
 
@@ -371,47 +405,50 @@ class PPClassifier(nn.Module):
     
 
 
+def get_default_classifier_config() -> ConfigDict:
 
-data_config = ConfigDict(
-    dict(
-        batch_size=128,
-        num_classes=10,
-        input_size=784,
+    data_config = ConfigDict(
+        dict(
+            batch_size=128,
+            num_classes=10,
+            input_size=784,
+        )
     )
-)
-model_config = ConfigDict(
-    dict(
-        hidden_size=512,
-        mlp_expansion=1,
-        dropout_rate=0.1,
-        num_layers=8,
-        dtype=jnp.float32,
-        num_classes=data_config.num_classes,
-        remat=(),
-        data_axis_name="data",
-        model_axis_name="model",
-        model_axis_size=4,
-        num_microbatches=8,
+    model_config = ConfigDict(
+        dict(
+            hidden_size=512,
+            mlp_expansion=1,
+            dropout_rate=0.1,
+            num_layers=8,
+            dtype=jnp.float32,
+            num_classes=data_config.num_classes,
+            remat=(),
+            data_axis_name="data",
+            model_axis_name="model",
+            model_axis_size=4,
+            num_microbatches=8,
+        )
     )
-)
-model_config.num_layers //= model_config.model_axis_size  # Layers distributed over model axis.
-optimizer_config = ConfigDict(
-    dict(
-        learning_rate=1e-3,
-        num_minibatches=1,
+    model_config.num_layers //= model_config.model_axis_size  # Layers distributed over model axis.
+    optimizer_config = ConfigDict(
+        dict(
+            learning_rate=1e-3,
+            num_minibatches=1,
+        )
     )
-)
-config = ConfigDict(
-    dict(
-        model=model_config,
-        optimizer=optimizer_config,
-        data=data_config,
-        data_axis_name=model_config.data_axis_name,
-        model_axis_name=model_config.model_axis_name,
-        model_axis_size=model_config.model_axis_size,
-        seed=42,
+    config = ConfigDict(
+        dict(
+            model=model_config,
+            optimizer=optimizer_config,
+            data=data_config,
+            data_axis_name=model_config.data_axis_name,
+            model_axis_name=model_config.model_axis_name,
+            model_axis_size=model_config.model_axis_size,
+            seed=42,
+        )
     )
-)
+
+    return config
 
 device_array = np.array(jax.devices()).reshape(-1, config.model_axis_size)
 mesh = Mesh(device_array, (config.data_axis_name, config.model_axis_name))
@@ -476,4 +513,86 @@ pprint(
 
 
 
+def loss_fn(
+    params: PyTree, apply_fn: Any, batch: Batch, rng: jax.Array
+) -> Tuple[jax.Array, Dict[str, Any]]:
+    
+    dropout_rng = fold_rng_over_axis(rng, (config.data_axis_name, config.model_axis_name))
+    # Remaining computation is the same as before for single device.
+    logits = apply_fn(
+        {"params": params},
+        batch.inputs,
+        train=True,
+        rngs={"dropout": dropout_rng},
+    )
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch.labels)
+    correct_pred = jnp.equal(jnp.argmax(logits, axis=-1), batch.labels)
+    batch_size = batch.inputs.shape[0]
+    # Mask out loss and accuracy for pipeline stages except last one.
+    model_idx = jax.lax.axis_index(config.model_axis_name)
+    model_size = jax.lax.psum(1, config.model_axis_name)
+    loss = jnp.where(model_idx != model_size - 1, 0.0, loss)
+    correct_pred = jnp.where(model_idx != model_size - 1, False, correct_pred)
+    batch_size = jnp.where(model_idx != model_size - 1, 0, batch_size)
+    # Collect metrics and return loss.
+    step_metrics = {
+        "loss": (loss.sum(), batch_size),
+        "accuracy": (correct_pred.sum(), batch_size),
+    }
+    loss = loss.mean()
+    return loss, step_metrics
 
+
+def train_step_pp(
+    state: TrainState,
+    metrics: Metrics | None,
+    batch: Batch,
+) -> Tuple[TrainState, Metrics]:
+    rng, step_rng = jax.random.split(state.rng)
+    grads, step_metrics = accumulate_gradients(
+        state,
+        batch,
+        step_rng,
+        config.optimizer.num_minibatches,
+        loss_fn=loss_fn,
+    )
+    # Update parameters. We need to sync the gradients across data devices before updating.
+    with jax.named_scope("sync_gradients"):
+        grads = sync_gradients(grads, (config.data_axis_name, config.model_axis_name))
+    new_state = state.apply_gradients(grads=grads, rng=rng)
+    # Sum metrics across replicas (both model and data axes).
+    with jax.named_scope("sync_metrics"):
+        step_metrics = tree_map(
+            lambda x: jax.lax.psum(x, axis_name=(config.data_axis_name, config.model_axis_name)),
+            step_metrics,
+        )
+    if metrics is None:
+        metrics = step_metrics
+    else:
+        metrics = tree_map(jnp.add, metrics, step_metrics)
+    return new_state, metrics
+
+train_step_pp_fn = jax.jit(
+    shard_map(
+        train_step_pp,
+        mesh,
+        in_specs=(state_pp_specs, P(), P(config.data_axis_name)),
+        out_specs=(state_pp_specs, P()),
+        check_rep=False,
+    ),
+    donate_argnames=("state", "metrics"),
+)
+_, metric_shapes = jax.eval_shape(
+    train_step_pp_fn,
+    state_pp,
+    None,
+    batch,
+)
+metrics_pp = tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
+state_pp, metrics_pp = train_step_pp_fn(state_pp, metrics_pp, batch)
+
+for _ in range(15):
+    state_pp, metrics_pp = train_step_pp_fn(state_pp, metrics_pp, batch)
+final_metrics_pp = tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
+state_pp, final_metrics_pp = train_step_pp_fn(state_pp, final_metrics_pp, batch)
+print_metrics(final_metrics_pp, title="Final Metrics - Pipeline")
