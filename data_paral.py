@@ -7,7 +7,6 @@ import functools
 from pprint import pprint
 from typing import Any , Callable , Dict,  Sequence, Tuple
 
-
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -24,6 +23,9 @@ from absl import logging
 
 from util import Batch , TrainState , accum_grads , Pytree , Metrics , print_metrics
 
+PyTree = Any
+Parameter = jax.Array | nn.Partitioned
+Metrics = Dict[str , Tuple[jax.Array , ...]]
 
 def fold_rng_over_axis(
         rng : jax.random.PRNGKey,
@@ -131,8 +133,15 @@ def init_dp(
         model : nn.Module
 ) -> TrainState:
     """
-    function to initialize training setup
-    """
+    Function to initialize model on each device
+
+    Args:
+        rng (jax.random.PRNGkey): key 
+        x (jax.Array): input
+        model (nn.Module): model to be initialized
+    Returns:
+        TrainState : state
+    """       
     init_rng , rng = jax.random.split(rng)
     var = model.init({"params" : init_rng} , x , train=False)
     params = var.pop("params")
@@ -250,6 +259,12 @@ train_step_dp_fn = jax.jit(
     donate_argnames=("state" , "metrics"),
 )
 
+
+def sync_grads(
+    grads : Pytree,
+    axis_names = Sequence[str]
+):
+    def _sync_grads(g : )
 
 
 _ , metric_shape = jax.eval_shape(
