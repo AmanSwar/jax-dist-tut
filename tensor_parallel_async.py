@@ -58,3 +58,11 @@ def async_gather_bidirectional(
     else:
         ps = [x] + ps_down + ps_up[::-1]
     return ps
+
+
+def async_gather_split(x: jax.Array, axis_name: str) -> List[jax.Array]:
+
+    x1, x2 = jax.tree_util.tree_map(lambda x: jnp.split(x, 2, axis=-1), x)
+    return async_gather(x1, axis_name, shift_up=True) + async_gather(
+        x2, axis_name, shift_up=False
+    )
