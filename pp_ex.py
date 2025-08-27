@@ -1,12 +1,27 @@
+
+import os
+
+
+def sim_multiCPU_dev(num_devices=8):
+    """Simulates multiple CPU devices for parallelism demonstrations."""
+    os.environ.update(
+        {
+            "XLA_FLAGS": f"--xla_force_host_platform_device_count={num_devices}",
+            "JAX_PLATFORMS": "cpu",
+        }
+    )
+    print(f"✅ Simulated {num_devices} CPU devices.")
+
+
+sim_multiCPU_dev(num_devices=8)
+
+
 import functools
-import jax.experimental
-import jax.experimental.shard_map
 import numpy as np
 from pprint import pprint
 from typing import Any, Callable, Dict, Tuple
 from dataclasses import dataclass
 
-# JAX/Flax/Optax imports
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -17,23 +32,11 @@ from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from jax.tree_util import tree_map
+from jax import tree_util
 from ml_collections import ConfigDict
 
-# PyTree type alias for type hinting
 PyTree = Any
 
-# ==============================================================================
-# ## 1. Utility Functions (Previously in external files)
-# These functions are necessary for the script to run.
-# ==============================================================================
-
-
-def sim_multiCPU_dev(num_devices=8):
-    """Simulates multiple CPU devices for parallelism testing."""
-    # To run on a CPU, we can simulate multiple devices.
-    # This flag needs to be set before JAX initializes its backends.
-    jax.config.update("jax_cpu_devices", num_devices)
-    print(f"Simulating {len(jax.devices())} CPU devices.")
 
 
 @dataclass
@@ -42,6 +45,19 @@ class Batch:
 
     inputs: jax.Array
     labels: jax.Array
+
+
+def flatten_batch(batch: Batch) -> Tuple[Tuple[jax.Array, ...], None]:
+    """Flattens the Batch object into its constituent arrays."""
+    return ((batch.inputs, batch.labels), None)
+
+
+def unflatten_batch(aux_data: None, children: Tuple[jax.Array, ...]) -> Batch:
+    """Unflattens the constituent arrays back into a Batch object."""
+    return Batch(inputs=children[0], labels=children[1])
+
+
+tree_util.register_pytree_node(Batch, flatten_batch, unflatten_batch)
 
 
 class TrainState(FlaxTrainState):
@@ -104,8 +120,11 @@ def accumulate_gradients(
 
 def print_metrics(metrics: Dict[str, Tuple[jax.Array, ...]], step: int):
     """Computes and prints metrics like loss and accuracy."""
-    loss = metrics["loss"][0] / metrics["loss"][1]
-    accuracy = metrics["accuracy"][0] / metrics["accuracy"][1] * 100
+    # Add a small epsilon to avoid division by zero if batch size is 0 on some stages
+    denominator_loss = metrics["loss"][1] + 1e-8
+    denominator_acc = metrics["accuracy"][1] + 1e-8
+    loss = metrics["loss"][0] / denominator_loss
+    accuracy = metrics["accuracy"][0] / denominator_acc * 100
     print(f"Step {step:03d} | Loss: {loss:.4f}, Accuracy: {accuracy:.2f}%")
 
 
@@ -115,7 +134,7 @@ def get_num_params(params: PyTree) -> int:
 
 
 # ==============================================================================
-# ## 2. Model and Pipeline Logic (User's Original Code)
+# ## 3. Model and Pipeline Logic
 # ==============================================================================
 
 Parameter = jax.Array | nn.Partitioned
@@ -132,7 +151,7 @@ class MLPBlock(nn.Module):
         residual = x
         x = nn.LayerNorm(dtype=self.config.dtype, name="pre_norm")(x)
         x = nn.Dense(
-            features=self.config.hidden_size * self.config.mlp_expansion,   
+            features=self.config.hidden_size * self.config.mlp_expansion,
             dtype=self.config.dtype,
             name="input_dense",
         )(x)
@@ -188,7 +207,7 @@ def stack_params(
 
         return nn.Partitioned(value, names=names)
 
-    return tree_map(_stack, params, is_leaf=lambda x: not isinstance(x, nn.Partitioned))
+    return tree_map(_stack, params)
 
 
 def unstack_params(params: PyTree, axis_name: str):
@@ -220,9 +239,9 @@ def execute_pipeline_step(
     **kwargs,
 ) -> Tuple[jax.Array, jax.Array]:
     """Executes a single step of a microbatch through one pipeline stage."""
-    #get total number of stages
+    # get total number of stages
     num_stages = jax.lax.psum(1, model_axis_name)
-    #stage index -> depending on device
+    # stage index -> depending on device
     stage_index = jax.lax.axis_index(model_axis_name)
 
     # The first stage takes the original input; other stages take the output from the previous one.
@@ -251,11 +270,11 @@ def execute_pipeline(
     **kwargs,
 ) -> jax.Array:
     """Executes the full pipeline schedule for a batch."""
-    #total devices
+    # total devices
     num_stages = jax.lax.psum(1, model_axis_name)
     batch_size = x.shape[0]
     microbatch_size = batch_size // num_microbatches
-    #reshape from (batch_size , dims...) -> (num_microbatches , microbatch_size , dims...)
+    # reshape from (batch_size , dims...) -> (num_microbatches , microbatch_size , dims...)
     microbatches = jnp.reshape(x, (num_microbatches, microbatch_size, *x.shape[1:]))
 
     # Add "bubble" inputs to keep the pipeline full.
@@ -434,7 +453,7 @@ def get_default_classifier_config() -> ConfigDict:
 
 
 def loss_fn(
-    params: PyTree, apply_fn: Any, batch: Batch, rng: jax.Array
+    params: PyTree, apply_fn: Any, batch: Batch, rng: jax.Array, config: ConfigDict
 ) -> Tuple[jax.Array, Dict[str, Any]]:
     dropout_rng = fold_rng_over_axis(
         rng, (config.data_axis_name, config.model_axis_name)
@@ -462,11 +481,15 @@ def loss_fn(
 
 
 def train_step_pp(
-    state: TrainState, metrics: Metrics | None, batch: Batch
+    state: TrainState, metrics: Metrics | None, batch: Batch, config: ConfigDict
 ) -> Tuple[TrainState, Metrics]:
     rng, step_rng = jax.random.split(state.rng)
+
+    # Pass config to loss_fn
+    bound_loss_fn = functools.partial(loss_fn, config=config)
+
     grads, step_metrics = accumulate_gradients(
-        state, batch, step_rng, config.optimizer.num_minibatches, loss_fn=loss_fn
+        state, batch, step_rng, config.optimizer.num_minibatches, loss_fn=bound_loss_fn
     )
     # Sync gradients across both data and model parallel axes.
     with jax.named_scope("sync_gradients"):
@@ -546,7 +569,7 @@ def train_pipeline_model(
     # JIT the sharded training step
     train_step_pp_fn = jax.jit(
         shard_map(
-            train_step_pp,
+            functools.partial(train_step_pp, config=config),
             mesh,
             in_specs=(state_pp_specs, P(), P(config.data_axis_name)),
             out_specs=(state_pp_specs, P()),
@@ -556,6 +579,7 @@ def train_pipeline_model(
     )
 
     # Initialize metrics accumulator
+    # The batch object is now a registered PyTree, so eval_shape will work.
     _, metric_shapes = jax.eval_shape(train_step_pp_fn, state_pp, None, batch)
     metrics_pp = tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
 
@@ -569,33 +593,23 @@ def train_pipeline_model(
     return state_pp
 
 
-# ==============================================================================
-# ## 3. Main Execution Block
-# ==============================================================================
 
 if __name__ == "__main__":
     """
     This block sets up the configuration, devices, data, and runs the training loop.
     """
-    # 1. Setup simulated devices
-    # We need 8 devices for a 2x4 mesh (data_axis x model_axis)
-    sim_multiCPU_dev(num_devices=8)
-
-    # 2. Configuration
     num_train_steps = 10
     config = get_default_classifier_config()
 
-    # Ensure the mesh shape matches the configuration
     data_axis_size = len(jax.devices()) // config.model.model_axis_size
 
-    # 3. Create the device mesh
     device_array = np.array(jax.devices()).reshape(
         data_axis_size, config.model.model_axis_size
     )
     mesh = Mesh(device_array, (config.data_axis_name, config.model_axis_name))
-    print(f"Created a {data_axis_size}x{config.model_axis_size} device mesh.")
+    print(f"JAX is using {len(jax.devices())} devices.")
+    print(f"Created a {data_axis_size}x{config.model.model_axis_size} device mesh.")
 
-    # 4. Create toy data
     rng = jax.random.PRNGKey(config.seed)
     model_init_rng, data_rng = jax.random.split(rng, 2)
     data_inputs_rng, data_labels_rng = jax.random.split(data_rng, 2)
@@ -609,7 +623,6 @@ if __name__ == "__main__":
         ),
     )
 
-    # 5. Run the training
     final_state = train_pipeline_model(
         config=config,
         mesh=mesh,
