@@ -7,6 +7,7 @@ import numpy as np
 
 import textwrap
 from termcolor import colored
+import os
 
 
 def print_exception(e):
@@ -61,6 +62,7 @@ def accum_grads_loop(
         end_idx = start_idx + min_batchSize
         # slicing Batch class
         miniBatch = jax.tree_util.tree_map(lambda x: x[start_idx:end_idx], batch)
+
 
         (_, step_metric), step_grad = grad_fn(
             state.params, state.apply_fn, miniBatch, keys[batch_idx]
@@ -143,7 +145,7 @@ def accum_grads(
     key,
     num_minibatches: int,
     loss_fn: Callable,
-    use_scan: bool = False,
+    use_scan: bool = True,
 ) -> Tuple[Pytree, Metrics]:
 
     if use_scan:

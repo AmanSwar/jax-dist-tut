@@ -31,46 +31,67 @@ def fold_rng_over_axis(
         rng : jax.random.PRNGKey,
         axis_name : str
 ):
-    
+    """
+    Function to ensure that each device gets a different RNG key
+
+    Args:
+        rng (jax.random.PRNGKey): _description_
+        axis_name (str): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    #get correspending device index
     axis_index = jax.lax.axis_index(axis_name)
     return jax.random.fold_in(rng , axis_index)
 
 
+def get_default_config():
+    """
+    Function to get base config consisting of 
+    - Data config
+    - Model config
+    - Optimizer config
+    Returns:
+        CONFIG (ConfigDict): main config class combining all the 3 
+    """
 # configs
-DATA_CONFIG = ConfigDict(
-    dict(
-        batch_size=128,
-        num_classes=10,
-        input_size=784,
+    DATA_CONFIG = ConfigDict(
+        dict(
+            batch_size=128,
+            num_classes=10,
+            input_size=784,
+        )
     )
-)
 
-MODEL_CONFIG = ConfigDict(
-    dict(
-        hidden_size=512,
-        dropout_rate=0.1,
-        dtype=jnp.bfloat16,
-        num_classes=DATA_CONFIG.num_classes,
-        data_axis_name="data",
+    MODEL_CONFIG = ConfigDict(
+        dict(
+            hidden_size=512,
+            dropout_rate=0.1,
+            dtype=jnp.bfloat16,
+            num_classes=DATA_CONFIG.num_classes,
+            data_axis_name="data",
+        )
     )
-)
 
-OPTIMIZER_CONFIG = ConfigDict(
-    dict(
-        learning_rate=1e-3,
-        num_minibatches=4,
+    OPTIMIZER_CONFIG = ConfigDict(
+        dict(
+            learning_rate=1e-3,
+            num_minibatches=4,
+        )
     )
-)
 
-CONFIG = ConfigDict(
-    dict(
-        model= MODEL_CONFIG,
-        optimizer = OPTIMIZER_CONFIG,
-        data = DATA_CONFIG,
-        data_axis_name=MODEL_CONFIG.data_axis_name,
-        seed=69,
+    CONFIG = ConfigDict(
+        dict(
+            model= MODEL_CONFIG,
+            optimizer = OPTIMIZER_CONFIG,
+            data = DATA_CONFIG,
+            data_axis_name=MODEL_CONFIG.data_axis_name,
+            seed=69,
+        )
     )
-)
+
+    return CONFIG
 
 
 class Classifier(nn.Module):
@@ -163,7 +184,7 @@ init_dp_fn = jax.jit(
     shard_map(
         functools.partial(init_dp , model=model_dp),
         mesh,
-        in_specs=(P() , P(CONFIG.data_axis_name)),
+        in_specs=(P() , P(CONFIG.data_config.data_axis_name)),
         out_specs=P(),
         check_rep=False,
     ),
@@ -181,18 +202,25 @@ def loss_fn(
         batch,
         rng
 ):
-    
-    dropout_rng = fold_rng_over_axis(rng , CONFIG.data_axis_name)
+    """
+    Loss function 
+    Args:
+        params : parameters of model
+        apply_fn : model.apply
+        batch : input
+        rng : PRNG key
+
+    Returns:
+        loss , step_metrics
+    """
+    dropout_rng = fold_rng_over_axis(rng , CONFIG.data_config.data_axis_name)
     logits = apply_fn({"params" : params} , batch.inputs , train=True , rngs={"dropout" : dropout_rng})
 
     loss = optax.softmax_cross_entropy_with_integer_labels(logits , batch.labels)
-
     correct_pred = jnp.equal(jnp.argmax(logits , axis=-1) , batch.labels)
-
     bs =batch.inputs.shape[0]
     step_metrics = {"loss" : (loss.sum() , bs) , "accuracy" : (correct_pred.sum() , bs)}
     loss = loss.mean()
-
     return loss , step_metrics
 
 
@@ -201,9 +229,20 @@ def train_step_dp(
         metrics : Metrics,
         batch : Batch
 )-> Tuple[TrainState , Metrics]:
-    
-    rng , step_rng = jax.random.split(state.rng)
+    """
+    function for train step
 
+    Args:
+        state (TrainState): paramets of the model along with their state 
+        metrics (Metrics): metrics
+        batch (Batch): input
+
+    Returns:
+        Tuple[TrainState , Metrics]
+    """
+    rng , step_rng = jax.random.split(state.rng)
+    
+    #grads and step metric after forward pass and applying loss
     grads , step_metrics = accum_grads(
         state,
         batch,
@@ -222,9 +261,8 @@ def train_step_dp(
         rng=rng
     )
 
-
+    #
     with jax.named_scope("sync_metrics"):
-
         step_metrics = jax.tree_util.tree_map(
             lambda x : jax.lax.psum(
                 x , 
